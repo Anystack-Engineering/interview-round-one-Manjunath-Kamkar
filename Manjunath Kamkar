@@ -1,0 +1,132 @@
+const jp = require('jsonpath');
+
+// Example: ensure every order has a non-empty id
+jp.query(data, '$.orders[*]').forEach((order, idx) => {
+  if (!order.id || order.id.trim() === '') {
+    throw new Error(`Order[${idx}] missing/empty id`);
+  }
+});
+
+// Example: email regex
+const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+jp.query(data, '$.orders[*].customer.email').forEach((email, idx) => {
+  if (email && !emailRegex.test(email)) {
+    throw new Error(`Order[${idx}] invalid email: ${email}`);
+  }
+});
+
+// Refund total check
+jp.query(data, '$.orders[?(@.status=="CANCELLED")]').forEach(order => {
+  if (order.lines?.length) {
+    const lineTotal = order.lines.reduce((sum, l) => sum + l.qty * l.price, 0);
+    if (order.refund?.amount !== lineTotal) {
+      throw new Error(`Order ${order.id} refund mismatch`);
+    }
+  }
+});
+
+
+const jp = require('jsonpath');
+const assert = require('assert');
+const data = require('./orders.json'); // your dataset
+
+// 1. Order IDs
+const orderIds = jp.query(data, '$.orders[*].id');
+assert.deepStrictEqual(orderIds, ["A-1001","A-1002","A-1003","A-1004","A-1005"]);
+
+// 2. Total line items
+const allLines = jp.query(data, '$.orders[*].lines[*]');
+assert.strictEqual(allLines.length, 8);
+
+// 3. Top 2 SKUs by quantity
+const skuTotals = {};
+allLines.forEach(l => { if(l.qty>0) skuTotals[l.sku] = (skuTotals[l.sku]||0) + l.qty; });
+const top2 = Object.entries(skuTotals).sort((a,b)=>b[1]-a[1]).slice(0,2);
+assert.deepStrictEqual(top2, [["PEN-RED",5],["USB-32GB",2]]);
+
+// 4. GMV per order
+const gmvs = {};
+jp.query(data, '$.orders[*]').forEach(o=>{
+  const total = (o.lines||[]).reduce((sum,l)=>sum + l.qty*l.price, 0);
+  gmvs[o.id] = total;
+});
+assert.deepStrictEqual(gmvs,{
+  "A-1001":70.0,
+  "A-1002":0.0,
+  "A-1003":-15.0, // should be flagged in quality tests
+  "A-1004":16.0,
+  "A-1005":55.0
+});
+
+// 5. Missing/invalid emails
+const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const badEmails = jp.query(data, '$.orders[*]').filter(
+  o => !o.customer?.email || !emailRegex.test(o.customer.email)
+).map(o=>o.id);
+assert.deepStrictEqual(badEmails, ["A-1002","A-1003"]);
+
+// 6. Paid orders with payment.captured=false
+const badPayments = jp.query(data, '$.orders[?(@.status=="PAID" && @.payment.captured!=true)].id');
+assert.deepStrictEqual(badPayments, []);
+
+// 7. Cancelled orders with correct refund amount
+const goodRefunds = jp.query(data, '$.orders[?(@.status=="CANCELLED")]')
+  .filter(o=>{
+    const sumLines = (o.lines||[]).reduce((s,l)=>s + l.qty*l.price, 0);
+    return o.refund?.amount === sumLines;
+  })
+  .map(o=>o.id);
+assert.deepStrictEqual(goodRefunds, ["A-1004"]);
+
+
+const jp = require('jsonpath');
+const assert = require('assert');
+const data = require('./orders.json'); // your dataset
+
+it('Aggregated Summary Report', () => {
+  const orders = jp.query(data, '$.orders[*]');
+  const totalOrders = orders.length;
+  const allLines = jp.query(data, '$.orders[*].lines[*]');
+  const totalLineItems = allLines.length;
+
+  const emailRegex = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+  const problematic = [];
+
+  orders.forEach(o => {
+    const reasons = [];
+
+    // Empty lines for paid/pending
+    if ((o.status === 'PAID' || o.status === 'PENDING') &&
+        (!o.lines || o.lines.length === 0)) {
+      reasons.push('empty lines for paid/pending order');
+    }
+
+    // Invalid or missing email
+    if (!o.customer?.email || !emailRegex.test(o.customer.email)) {
+      reasons.push('missing/invalid email');
+    }
+
+    // Non-positive qty/price
+    (o.lines || []).forEach(l => {
+      if (l.qty <= 0) reasons.push(`line ${l.sku} has non-positive qty`);
+      if (l.price < 0) reasons.push(`line ${l.sku} has negative price`);
+    });
+
+    if (reasons.length > 0) {
+      problematic.push({ orderId: o.id, reasons });
+    }
+  });
+
+  const summary = {
+    totalOrders,
+    totalLineItems,
+    invalidOrders: problematic.length,
+    problematic
+  };
+
+  console.log('==== Summary Report ====');
+  console.log(JSON.stringify(summary, null, 2));
+
+  // Single assertion – just ensure something was produced
+  assert.ok(JSON.stringify(summary).length > 0);
+});
